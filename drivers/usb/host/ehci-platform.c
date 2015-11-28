@@ -233,6 +233,18 @@ static int ehci_platform_probe(struct platform_device *dev)
 				break;
 			}
 		}
+	} else if (pdata->phys && pdata->num_phys > 0) {
+		priv->num_phys = pdata->num_phys;
+		priv->phys = devm_kcalloc(&dev->dev, priv->num_phys,
+					    sizeof(struct phy *), GFP_KERNEL);
+		for (phy_num = 0; phy_num < priv->num_phys; phy_num++) {
+			priv->phys[phy_num] = devm_phy_optional_get(
+				&dev->dev, pdata->phys[phy_num]);
+			if (IS_ERR(priv->phys[phy_num])) {
+				err = PTR_ERR(priv->phys[phy_num]);
+				goto err_put_hcd;
+			}
+		}
 	}
 
 	for (rst = 0; rst < EHCI_MAX_RSTS; rst++) {
