@@ -477,6 +477,47 @@ int mtd_pairing_groups(struct mtd_info *mtd)
 }
 EXPORT_SYMBOL_GPL(mtd_pairing_groups);
 
+static int mtd_nvmem_reg_read(void *priv, unsigned int offset,
+			      void *val, size_t bytes)
+{
+	struct mtd_info *mtd = priv;
+	size_t retlen;
+	int err;
+
+	err = mtd_read(mtd, offset, bytes, &retlen, val);
+	if (err && err != -EUCLEAN)
+		return err;
+
+	return retlen == bytes ? 0 : -EIO;
+}
+
+static int mtd_nvmem_add(struct mtd_info *mtd)
+{
+	struct device_node *np = dev_of_node(&mtd->dev);
+	struct nvmem_config config = {};
+
+	/* OF devices must have the nvmem-provider property */
+	if (np && !of_property_read_bool(np, "nvmem-provider"))
+		return 0;
+
+	config.dev = &mtd->dev;
+	config.owner = THIS_MODULE;
+	config.reg_read = mtd_nvmem_reg_read;
+	config.size = mtd->size;
+	config.word_size = 1;
+	config.stride = 1;
+	config.read_only = true;
+	config.priv = mtd;
+
+	mtd->nvmem = nvmem_register(&config);
+	if (IS_ERR(mtd->nvmem)) {
+		dev_err(&mtd->dev, "Failed to register NVMEM device\n");
+		return PTR_ERR(mtd->nvmem);
+	}
+
+	return 0;
+}
+
 /**
  *	add_mtd_device - register an MTD device
  *	@mtd: pointer to new MTD device info structure
@@ -554,6 +595,11 @@ int add_mtd_device(struct mtd_info *mtd)
 	if (error)
 		goto fail_added;
 
+	/* Add the nvmem provider */
+	error = mtd_nvmem_add(mtd);
+	if (error)
+		goto fail_nvmem_add;
+
 	device_create(&mtd_class, mtd->dev.parent, MTD_DEVT(i) + 1, NULL,
 		      "mtd%dro", i);
 
@@ -571,6 +617,8 @@ int add_mtd_device(struct mtd_info *mtd)
 	__module_get(THIS_MODULE);
 	return 0;
 
+fail_nvmem_add:
+	device_unregister(&mtd->dev);
 fail_added:
 	of_node_put(mtd_get_of_node(mtd));
 	idr_remove(&mtd_idr, i);
@@ -611,6 +659,16 @@ int del_mtd_device(struct mtd_info *mtd)
 		       mtd->index, mtd->name, mtd->usecount);
 		ret = -EBUSY;
 	} else {
+		/* Try to remove the NVMEM provider */
+		if (mtd->nvmem) {
+			ret = nvmem_unregister(mtd->nvmem);
+			if (ret) {
+				dev_err(&mtd->dev,
+					"Failed to unregister NVMEM device\n");
+				goto out_error;
+			}
+		}
+
 		device_unregister(&mtd->dev);
 
 		idr_remove(&mtd_idr, mtd->index);
